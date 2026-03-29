@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  app-dingtalk:
+    build: .
+    container_name: openilink-app-dingtalk
+    restart: unless-stopped
+    ports:
+      - "8084:8084"
+    environment:
+      - HUB_URL=${HUB_URL}
+      - BASE_URL=${BASE_URL}
+      - DINGTALK_CLIENT_ID=${DINGTALK_CLIENT_ID}
+      - DINGTALK_CLIENT_SECRET=${DINGTALK_CLIENT_SECRET}
+      - DINGTALK_ROBOT_CODE=${DINGTALK_ROBOT_CODE}
+      - DB_PATH=/data/dingtalk.db
+      - PORT=8084
+    volumes:
+      - dingtalk-data:/data
+
+volumes:
+  dingtalk-data:
+    driver: local
