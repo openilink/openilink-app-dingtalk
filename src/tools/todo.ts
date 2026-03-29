@@ -119,8 +119,8 @@ function createHandlers(client: DingtalkClient): Map<string, ToolHandler> {
       const token = await client.getAccessToken();
       // TODO: 需要当前用户的 unionId，此处使用 ctx.userId 作为 fallback
       const unionId = ctx.userId;
-      // TODO: 确认待办列表 API 路径，当前基于官方文档
-      const url = `https://api.dingtalk.com/v1.0/todo/users/${unionId}/tasks/query`;
+      // 待办列表使用 org/tasks/query 路径
+      const url = `https://api.dingtalk.com/v1.0/todo/users/${unionId}/org/tasks/query`;
 
       const resp = await fetch(url, {
         method: "POST",
@@ -174,8 +174,8 @@ function createHandlers(client: DingtalkClient): Map<string, ToolHandler> {
       const token = await client.getAccessToken();
       // TODO: 需要当前用户的 unionId，此处使用 ctx.userId 作为 fallback
       const unionId = ctx.userId;
-      // TODO: 确认完成待办 API 路径
-      const url = `https://api.dingtalk.com/v1.0/todo/users/${unionId}/tasks/${task_id}/executorStatus/update`;
+      // 完成待办使用 executorStatus 路径（不含末尾 /update）
+      const url = `https://api.dingtalk.com/v1.0/todo/users/${unionId}/tasks/${task_id}/executorStatus`;
 
       const resp = await fetch(url, {
         method: "PUT",

@@ -86,24 +86,27 @@ const definitions: ToolDefinition[] = [
 function createHandlers(client: DingtalkClient): Map<string, ToolHandler> {
   const handlers = new Map<string, ToolHandler>();
 
-  // 查看日程列表
+  // 查看日程列表（使用 POST 方法，参数通过 JSON body 传递）
   handlers.set("list_events", async (ctx) => {
     const { user_id, start_time, end_time } = ctx.args;
     try {
       const token = await client.getAccessToken();
-      const baseUrl = `https://api.dingtalk.com/v1.0/calendar/users/${user_id}/calendars/primary/events`;
-      const params = new URLSearchParams();
-      if (start_time) params.set("timeMin", start_time);
-      if (end_time) params.set("timeMax", end_time);
-      // 最多返回 50 条
-      params.set("maxResults", "50");
+      const url = `https://api.dingtalk.com/v1.0/calendar/users/${user_id}/calendars/primary/events`;
 
-      const url = params.toString() ? `${baseUrl}?${params}` : baseUrl;
+      // 构造请求体
+      const body: Record<string, any> = {
+        maxResults: 50,
+      };
+      if (start_time) body.timeMin = start_time;
+      if (end_time) body.timeMax = end_time;
+
       const resp = await fetch(url, {
-        method: "GET",
+        method: "POST",
         headers: {
+          "Content-Type": "application/json",
           "x-acs-dingtalk-access-token": token,
         },
+        body: JSON.stringify(body),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT),
       });
 
@@ -187,9 +190,9 @@ function createHandlers(client: DingtalkClient): Map<string, ToolHandler> {
       const token = await client.getAccessToken();
       const userIdList = (user_ids as string).split(",").map((s) => s.trim());
 
-      // TODO: 查忙闲接口路径需要确认，此处按官方文档使用 unionId
+      // 查忙闲使用 querySchedule 接口
       const userId = userIdList[0]; // 以第一个用户作为操作者
-      const url = `https://api.dingtalk.com/v1.0/calendar/users/${userId}/queryFreeBusy`;
+      const url = `https://api.dingtalk.com/v1.0/calendar/users/${userId}/querySchedule`;
 
       const resp = await fetch(url, {
         method: "POST",

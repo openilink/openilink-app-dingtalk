@@ -20,9 +20,10 @@ const definitions: ToolDefinition[] = [
       properties: {
         process_code: {
           type: "string",
-          description: "审批模板的唯一标识（process_code），可选",
+          description: "审批模板的唯一标识（process_code），必填",
         },
       },
+      required: ["process_code"],
     },
   },
   {
