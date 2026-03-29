@@ -47,6 +47,7 @@ export class HubClient {
     if (options?.url) body.url = options.url;
     if (options?.base64) body.base64 = options.base64;
     if (options?.filename) body.filename = options.filename;
+    if (traceId) body.trace_id = traceId;
 
     const res = await fetch(url, {
       method: "POST",
