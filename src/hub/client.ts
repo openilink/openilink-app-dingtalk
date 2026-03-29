@@ -66,6 +66,45 @@ export class HubClient {
   }
 
   /**
+   * 同步工具定义到 Hub
+   * PUT {hubUrl}/bot/v1/app/tools
+   * @param tools - 工具定义数组
+   */
+  async syncTools(tools: Record<string, unknown>[]): Promise<void> {
+    const url = `${this.hubUrl}/bot/v1/app/tools`;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeout);
+
+    try {
+      const res = await fetch(url, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.appToken}`,
+        },
+        body: JSON.stringify({ tools }),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        console.error(`[HubClient] 同步工具失败: ${res.status} — ${errText}`);
+      } else {
+        console.log(`[HubClient] 工具同步成功，共 ${tools.length} 个`);
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        console.error(`[HubClient] 同步工具超时 (${this.timeout}ms)`);
+      } else {
+        console.error("[HubClient] 同步工具异常:", err);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * 发送通用消息（底层方法）
    * @param payload - 消息体
    * @returns Hub API 响应

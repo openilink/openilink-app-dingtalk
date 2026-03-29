@@ -12,15 +12,107 @@ import { handleWebhook } from "./hub/webhook.js";
 import { createManifest } from "./hub/manifest.js";
 import type { HubEvent } from "./hub/types.js";
 import { HubClient } from "./hub/client.js";
+import { DingtalkClient } from "./dingtalk/client.js";
+import { collectAllTools } from "./tools/index.js";
 
 // 加载配置
 const config = loadConfig();
 const store = new Store(config.dbPath);
 const manifest = createManifest(config);
 
+// 初始化钉钉客户端
+const dingtalkClient = new DingtalkClient(
+  config.dingtalkClientId,
+  config.dingtalkClientSecret,
+  config.dingtalkRobotCode,
+);
+
+// 收集所有工具定义和处理器
+const { definitions: toolDefinitions, handlers: toolHandlers } =
+  collectAllTools(dingtalkClient);
+console.log(`[Server] 已注册 ${toolDefinitions.length} 个 AI Tools`);
+
+// 将工具定义转换为 Hub 同步格式
+const toolsForHub = toolDefinitions.map((t) => ({
+  name: t.name,
+  description: t.description,
+  command: t.command,
+  parameters: t.parameters,
+}));
+
 /**
- * 处理 Hub 推送的事件
- * 后续在此扩展钉钉消息转发逻辑
+ * 向指定安装同步工具定义
+ */
+async function syncToolsToInstallation(hubUrl: string, appToken: string): Promise<void> {
+  const client = new HubClient(hubUrl, appToken);
+  await client.syncTools(toolsForHub);
+}
+
+/**
+ * 启动时遍历所有已有安装，同步工具定义
+ */
+async function syncToolsOnStartup(): Promise<void> {
+  const installations = store.getAllInstallations();
+  if (installations.length === 0) {
+    console.log("[Server] 暂无安装记录，跳过启动时工具同步");
+    return;
+  }
+
+  console.log(`[Server] 启动时同步工具到 ${installations.length} 个安装...`);
+  for (const inst of installations) {
+    try {
+      await syncToolsToInstallation(inst.hubUrl, inst.appToken);
+    } catch (err) {
+      console.error(`[Server] 同步工具到安装 ${inst.id} 失败:`, err);
+    }
+  }
+}
+
+/**
+ * 处理 command 事件（同步/异步响应模式）
+ * 在 SYNC_DEADLINE 内完成则同步返回结果，超时则由调用方异步推送
+ */
+async function onCommand(event: HubEvent, installationId: string): Promise<string> {
+  const installation = store.getInstallation(installationId);
+  if (!installation) {
+    return `未找到安装: ${installationId}`;
+  }
+
+  const data = event.event?.data;
+  if (!data) return "缺少事件数据";
+
+  const command = data.command as string;
+  const args = (data.args as Record<string, any>) ?? {};
+  const userId = data.user_id as string;
+
+  const handler = toolHandlers.get(command);
+  if (!handler) {
+    return `未知指令: ${command}`;
+  }
+
+  try {
+    const result = await handler({
+      installationId,
+      botId: event.bot.id,
+      userId,
+      traceId: event.trace_id,
+      args,
+    });
+
+    // 如果已经超时，需要通过 HubClient 异步推送结果
+    // 调用方会在超时后忽略此返回值，但我们在此处做兜底推送
+    return result;
+  } catch (err) {
+    console.error(`[Event] 工具调用失败: ${command}`, err);
+    // 超时后异步推送错误信息
+    const hubClient = new HubClient(installation.hubUrl, installation.appToken);
+    await hubClient.sendText(userId, `工具 ${command} 执行失败`).catch(() => {});
+    return `工具 ${command} 执行失败`;
+  }
+}
+
+/**
+ * 处理非 command 类型的 Hub 事件
  */
 async function onHubEvent(event: HubEvent): Promise<void> {
   console.log(
@@ -38,7 +130,6 @@ async function onHubEvent(event: HubEvent): Promise<void> {
 
   // TODO: 根据事件类型分发处理
   // - message: 转发微信消息到钉钉
-  // - command: 处理命令
   console.log(`[Event] 事件数据:`, JSON.stringify(event.event?.data));
 }
 
@@ -74,13 +165,13 @@ async function handleRequest(
     }
 
     if (pathname === "/oauth/redirect" && req.method === "GET") {
-      await handleOAuthRedirect(req, res, config, store);
+      await handleOAuthRedirect(req, res, config, store, toolsForHub);
       return;
     }
 
-    // Hub Webhook
+    // Hub Webhook（传入 command 处理器）
     if (pathname === "/hub/webhook") {
-      await handleWebhook(req, res, store, onHubEvent);
+      await handleWebhook(req, res, store, onHubEvent, onCommand);
       return;
     }
 
@@ -103,6 +194,11 @@ server.listen(Number(config.port), () => {
   console.log(`[Server] 钉钉 Bridge 已启动，端口: ${config.port}`);
   console.log(`[Server] Manifest: ${config.baseUrl}/manifest.json`);
   console.log(`[Server] Webhook:  ${config.baseUrl}/hub/webhook`);
+
+  // 启动后同步工具到所有已有安装
+  syncToolsOnStartup().catch((err) => {
+    console.error("[Server] 启动时同步工具异常:", err);
+  });
 });
 
 // 优雅退出

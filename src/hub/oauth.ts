@@ -10,6 +10,7 @@ import { generatePKCE } from "../utils/crypto.js";
 import type { Config } from "../config.js";
 import type { Store } from "../store.js";
 import type { Installation } from "./types.js";
+import { HubClient } from "./client.js";
 
 /**
  * 临时存储 PKCE code_verifier（键为 state）
@@ -75,7 +76,8 @@ export async function handleOAuthRedirect(
   req: IncomingMessage,
   res: ServerResponse,
   config: Config,
-  store: Store
+  store: Store,
+  tools?: Record<string, unknown>[],
 ): Promise<void> {
   const url = new URL(req.url ?? "/", config.baseUrl);
   const code = url.searchParams.get("code");
@@ -139,6 +141,14 @@ export async function handleOAuthRedirect(
     store.saveInstallation(installation);
 
     console.log(`[OAuth] 安装成功: ${installation.id}`);
+
+    // OAuth 完成后同步工具定义到 Hub
+    if (tools && tools.length > 0) {
+      const hubClient = new HubClient(installation.hubUrl, installation.appToken);
+      await hubClient.syncTools(tools).catch((err) => {
+        console.error("[OAuth] 同步工具失败:", err);
+      });
+    }
 
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(
