@@ -1,20 +1,24 @@
 /**
  * Hub Bot API 客户端
- * 通过 Hub 提供的 REST API 向微信发送消息
+ * 通过 Hub 提供的 REST API 发送消息
+ * 路径: POST {hubUrl}/bot/v1/message/send
  */
 
-/** 通用消息体类型 */
-interface MessagePayload {
-  type: string;
-  to_user_id: string;
-  [key: string]: unknown;
+/** 发送消息的可选参数 */
+interface SendMessageOptions {
+  /** 媒体 URL */
+  url?: string;
+  /** Base64 编码的媒体内容 */
+  base64?: string;
+  /** 文件名 */
+  filename?: string;
+  /** 追踪 ID */
+  traceId?: string;
 }
 
 export class HubClient {
   private hubUrl: string;
   private appToken: string;
-  /** 请求超时时间（毫秒） */
-  private timeout = 30_000;
 
   constructor(hubUrl: string, appToken: string) {
     this.hubUrl = hubUrl.replace(/\/+$/, "");
@@ -22,47 +26,67 @@ export class HubClient {
   }
 
   /**
-   * 发送文本消息
-   * @param toUserId - 目标微信用户 ID
-   * @param text     - 文本内容
+   * 发送通用消息
+   * POST {hubUrl}/bot/v1/message/send
+   *
+   * @param to      - 目标用户/群组 ID
+   * @param type    - 消息类型（text / image / file 等）
+   * @param content - 消息内容
+   * @param options - 可选参数（url / base64 / filename / traceId）
    */
-  async sendText(toUserId: string, text: string): Promise<void> {
-    await this.sendMessage({
-      type: "text",
-      to_user_id: toUserId,
-      text: { content: text },
+  async sendMessage(
+    to: string,
+    type: string,
+    content: string,
+    options?: SendMessageOptions,
+  ): Promise<Record<string, unknown>> {
+    const url = `${this.hubUrl}/bot/v1/message/send`;
+    const traceId = options?.traceId ?? crypto.randomUUID();
+
+    const body: Record<string, unknown> = { to, type, content };
+    if (options?.url) body.url = options.url;
+    if (options?.base64) body.base64 = options.base64;
+    if (options?.filename) body.filename = options.filename;
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.appToken}`,
+        "X-Trace-Id": traceId,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
     });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(
+        `Hub API 请求失败: ${res.status} ${res.statusText} — ${errText}`,
+      );
+    }
+
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  /**
+   * 发送文本消息
+   * @param to      - 目标用户/群组 ID
+   * @param text    - 文本内容
+   * @param traceId - 追踪 ID（可选）
+   */
+  async sendText(to: string, text: string, traceId?: string): Promise<void> {
+    await this.sendMessage(to, "text", text, { traceId });
   }
 
   /**
    * 发送图片消息
-   * @param toUserId - 目标微信用户 ID
-   * @param imageUrl - 图片 URL
+   * @param to      - 目标用户/群组 ID
+   * @param url     - 图片 URL
+   * @param traceId - 追踪 ID（可选）
    */
-  async sendImage(toUserId: string, imageUrl: string): Promise<void> {
-    await this.sendMessage({
-      type: "image",
-      to_user_id: toUserId,
-      image: { url: imageUrl },
-    });
-  }
-
-  /**
-   * 发送文件消息
-   * @param toUserId - 目标微信用户 ID
-   * @param fileUrl  - 文件 URL
-   * @param fileName - 文件名
-   */
-  async sendFile(
-    toUserId: string,
-    fileUrl: string,
-    fileName: string
-  ): Promise<void> {
-    await this.sendMessage({
-      type: "file",
-      to_user_id: toUserId,
-      file: { url: fileUrl, name: fileName },
-    });
+  async sendImage(to: string, url: string, traceId?: string): Promise<void> {
+    await this.sendMessage(to, "image", "", { url, traceId });
   }
 
   /**
@@ -73,9 +97,6 @@ export class HubClient {
   async syncTools(tools: Record<string, unknown>[]): Promise<void> {
     const url = `${this.hubUrl}/bot/v1/app/tools`;
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeout);
-
     try {
       const res = await fetch(url, {
         method: "PUT",
@@ -84,7 +105,7 @@ export class HubClient {
           Authorization: `Bearer ${this.appToken}`,
         },
         body: JSON.stringify({ tools }),
-        signal: controller.signal,
+        signal: AbortSignal.timeout(30_000),
       });
 
       if (!res.ok) {
@@ -95,52 +116,10 @@ export class HubClient {
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") {
-        console.error(`[HubClient] 同步工具超时 (${this.timeout}ms)`);
+        console.error("[HubClient] 同步工具超时 (30s)");
       } else {
         console.error("[HubClient] 同步工具异常:", err);
       }
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  /**
-   * 发送通用消息（底层方法）
-   * @param payload - 消息体
-   * @returns Hub API 响应
-   */
-  async sendMessage(payload: MessagePayload): Promise<Record<string, unknown>> {
-    const url = `${this.hubUrl}/api/v1/bot/messages`;
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeout);
-
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this.appToken}`,
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
-
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(
-          `Hub API 请求失败: ${res.status} ${res.statusText} — ${errText}`
-        );
-      }
-
-      return (await res.json()) as Record<string, unknown>;
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") {
-        throw new Error(`Hub API 请求超时 (${this.timeout}ms)`);
-      }
-      throw err;
-    } finally {
-      clearTimeout(timer);
     }
   }
 }

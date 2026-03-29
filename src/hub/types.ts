@@ -47,7 +47,7 @@ export interface Installation {
   createdAt?: string;
 }
 
-/** 消息关联记录：钉钉会话消息 ↔ 微信用户 */
+/** 消息关联记录：钉钉会话消息 <-> 微信用户 */
 export interface MessageLink {
   /** 自增 ID */
   id?: number;
@@ -91,5 +91,19 @@ export interface ToolContext {
   args: Record<string, unknown>;
 }
 
+/** Tool 处理结果 — 支持文本和媒体类型 */
+export interface ToolResult {
+  /** 回复文本 */
+  reply: string;
+  /** 回复类型，默认 text */
+  reply_type?: string;
+  /** 媒体 URL */
+  reply_url?: string;
+  /** 媒体 Base64 */
+  reply_base64?: string;
+  /** 文件名 */
+  reply_name?: string;
+}
+
 /** Tool 处理函数签名 */
-export type ToolHandler = (ctx: ToolContext) => Promise<string>;
+export type ToolHandler = (ctx: ToolContext) => Promise<string | ToolResult>;

@@ -1,6 +1,6 @@
 /**
  * OpeniLink Hub App — 钉钉 Bridge
- * 微信 ↔ 钉钉双向消息桥接的 HTTP 服务入口
+ * 微信 <-> 钉钉双向消息桥接的 HTTP 服务入口
  */
 
 import { createServer } from "node:http";
@@ -10,7 +10,7 @@ import { Store } from "./store.js";
 import { handleOAuthSetup, handleOAuthRedirect } from "./hub/oauth.js";
 import { handleWebhook } from "./hub/webhook.js";
 import { createManifest } from "./hub/manifest.js";
-import type { HubEvent } from "./hub/types.js";
+import type { HubEvent, ToolResult } from "./hub/types.js";
 import { HubClient } from "./hub/client.js";
 import { DingtalkClient } from "./dingtalk/client.js";
 import { collectAllTools } from "./tools/index.js";
@@ -72,7 +72,7 @@ async function syncToolsOnStartup(): Promise<void> {
  * 处理 command 事件（同步/异步响应模式）
  * 在 SYNC_DEADLINE 内完成则同步返回结果，超时则由调用方异步推送
  */
-async function onCommand(event: HubEvent, installationId: string): Promise<string> {
+async function onCommand(event: HubEvent, installationId: string): Promise<string | ToolResult> {
   const installation = store.getInstallation(installationId);
   if (!installation) {
     return `未找到安装: ${installationId}`;
@@ -99,14 +99,18 @@ async function onCommand(event: HubEvent, installationId: string): Promise<strin
       args,
     });
 
-    // 如果已经超时，需要通过 HubClient 异步推送结果
-    // 调用方会在超时后忽略此返回值，但我们在此处做兜底推送
     return result;
   } catch (err) {
     console.error(`[Event] 工具调用失败: ${command}`, err);
-    // 超时后异步推送错误信息
+    // 异步推送错误信息
     const hubClient = new HubClient(installation.hubUrl, installation.appToken);
-    await hubClient.sendText(userId, `工具 ${command} 执行失败`).catch(() => {});
+    const to =
+      (data.group as { id?: string })?.id ??
+      (data.sender as { id?: string })?.id ??
+      userId ??
+      (data.from as string) ??
+      "";
+    await hubClient.sendText(to, `工具 ${command} 执行失败`, event.trace_id).catch(() => {});
     return `工具 ${command} 执行失败`;
   }
 }
@@ -116,7 +120,7 @@ async function onCommand(event: HubEvent, installationId: string): Promise<strin
  */
 async function onHubEvent(event: HubEvent): Promise<void> {
   console.log(
-    `[Event] type=${event.event?.type} id=${event.event?.id} trace=${event.trace_id}`
+    `[Event] type=${event.event?.type} id=${event.event?.id} trace=${event.trace_id}`,
   );
 
   const installation = store.getInstallation(event.installation_id);
@@ -125,11 +129,10 @@ async function onHubEvent(event: HubEvent): Promise<void> {
     return;
   }
 
-  // 创建 Hub 客户端用于回复微信
+  // 创建 Hub 客户端用于回复
   const _client = new HubClient(installation.hubUrl, installation.appToken);
 
   // TODO: 根据事件类型分发处理
-  // - message: 转发微信消息到钉钉
   console.log(`[Event] 事件数据:`, JSON.stringify(event.event?.data));
 }
 
@@ -138,7 +141,7 @@ async function onHubEvent(event: HubEvent): Promise<void> {
  */
 async function handleRequest(
   req: IncomingMessage,
-  res: ServerResponse
+  res: ServerResponse,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", config.baseUrl);
   const pathname = url.pathname;
@@ -169,7 +172,7 @@ async function handleRequest(
       return;
     }
 
-    // Hub Webhook（传入 command 处理器）
+    // Hub Webhook（传入 onEvent 和 command 处理器）
     if (pathname === "/hub/webhook") {
       await handleWebhook(req, res, store, onHubEvent, onCommand);
       return;

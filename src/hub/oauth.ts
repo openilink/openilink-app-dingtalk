@@ -2,7 +2,10 @@
  * OAuth2 + PKCE 安装流程
  *
  * 1. Hub 访问 /oauth/setup → 本模块生成 PKCE，重定向到 Hub 授权页
- * 2. Hub 授权完成后回调 /oauth/redirect → 用 code + code_verifier 换取 app_token
+ *    查询参数: hub, app_id, bot_id, state(hub_state), return_url
+ * 2. Hub 授权完成后回调 /oauth/redirect → 用 code + code_verifier 换取安装信息
+ *    Exchange: POST {hub}/api/apps/{appId}/oauth/exchange body: {code, code_verifier}
+ * 3. 成功后同步 tools + 重定向到 returnUrl
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -13,51 +16,64 @@ import type { Installation } from "./types.js";
 import { HubClient } from "./client.js";
 
 /**
- * 临时存储 PKCE code_verifier（键为 state）
+ * 临时存储 PKCE localState → {verifier, hub, appId, returnUrl}
  * 生产环境应考虑过期清理
  */
-const pendingStates = new Map<string, { codeVerifier: string; hubUrl: string }>();
+const pendingStates = new Map<
+  string,
+  { verifier: string; hub: string; appId: string; returnUrl: string }
+>();
 
 /**
  * 处理 GET /oauth/setup
  * Hub 会将用户引导到此端点开始安装
  *
  * 查询参数:
- *  - hub_url: Hub 的地址
+ *  - hub: Hub 地址
  *  - app_id: 应用 ID
+ *  - bot_id: Bot ID
+ *  - state: Hub 侧传来的 state（hub_state）
+ *  - return_url: 安装完成后重定向地址
  */
 export function handleOAuthSetup(
   req: IncomingMessage,
   res: ServerResponse,
-  config: Config
+  config: Config,
 ): void {
   const url = new URL(req.url ?? "/", config.baseUrl);
-  const hubUrl = url.searchParams.get("hub_url");
+  const hub = url.searchParams.get("hub");
   const appId = url.searchParams.get("app_id");
+  const botId = url.searchParams.get("bot_id") ?? "";
+  const hubState = url.searchParams.get("state") ?? "";
+  const returnUrl = url.searchParams.get("return_url") ?? "";
 
-  if (!hubUrl || !appId) {
+  if (!hub || !appId) {
     res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "缺少 hub_url 或 app_id 参数" }));
+    res.end(JSON.stringify({ error: "缺少 hub 或 app_id 参数" }));
     return;
   }
 
   // 生成 PKCE 参数
   const { codeVerifier, codeChallenge } = generatePKCE();
 
-  // 生成随机 state 防止 CSRF
-  const state = crypto.randomUUID();
-  pendingStates.set(state, { codeVerifier, hubUrl });
+  // 生成本地随机 localState，缓存关键信息
+  const localState = crypto.randomUUID();
+  pendingStates.set(localState, {
+    verifier: codeVerifier,
+    hub,
+    appId,
+    returnUrl,
+  });
 
   // 5 分钟后自动清理，防止内存泄漏
-  setTimeout(() => pendingStates.delete(state), 5 * 60 * 1000);
+  setTimeout(() => pendingStates.delete(localState), 5 * 60 * 1000);
 
-  // 构建 Hub 授权 URL
-  const authorizeUrl = new URL("/oauth/authorize", hubUrl);
-  authorizeUrl.searchParams.set("app_id", appId);
-  authorizeUrl.searchParams.set("redirect_uri", `${config.baseUrl}/oauth/redirect`);
-  authorizeUrl.searchParams.set("state", state);
+  // 构建 Hub 授权 URL: {hub}/api/apps/{appId}/oauth/authorize
+  const authorizeUrl = new URL(`/api/apps/${appId}/oauth/authorize`, hub);
+  if (botId) authorizeUrl.searchParams.set("bot_id", botId);
+  authorizeUrl.searchParams.set("state", localState);
   authorizeUrl.searchParams.set("code_challenge", codeChallenge);
-  authorizeUrl.searchParams.set("code_challenge_method", "S256");
+  if (hubState) authorizeUrl.searchParams.set("hub_state", hubState);
 
   // 重定向到 Hub 授权页
   res.writeHead(302, { Location: authorizeUrl.toString() });
@@ -70,7 +86,7 @@ export function handleOAuthSetup(
  *
  * 查询参数:
  *  - code: 授权码
- *  - state: 之前传出的 state
+ *  - state: 之前传出的 localState
  */
 export async function handleOAuthRedirect(
   req: IncomingMessage,
@@ -89,7 +105,7 @@ export async function handleOAuthRedirect(
     return;
   }
 
-  // 查找并消费 state 对应的 code_verifier
+  // 查找并消费 state 对应的缓存信息
   const pending = pendingStates.get(state);
   if (!pending) {
     res.writeHead(400, { "Content-Type": "application/json" });
@@ -99,17 +115,17 @@ export async function handleOAuthRedirect(
   pendingStates.delete(state);
 
   try {
-    // 用 code + code_verifier 换取 app_token
-    const tokenUrl = new URL("/api/v1/oauth/token", pending.hubUrl);
-    const tokenRes = await fetch(tokenUrl.toString(), {
+    // 用 code + code_verifier 换取安装信息
+    // POST {hub}/api/apps/{appId}/oauth/exchange
+    const exchangeUrl = `${pending.hub.replace(/\/+$/, "")}/api/apps/${pending.appId}/oauth/exchange`;
+    const tokenRes = await fetch(exchangeUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        grant_type: "authorization_code",
         code,
-        code_verifier: pending.codeVerifier,
-        redirect_uri: `${config.baseUrl}/oauth/redirect`,
+        code_verifier: pending.verifier,
       }),
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!tokenRes.ok) {
@@ -131,7 +147,7 @@ export async function handleOAuthRedirect(
     // 持久化安装信息
     const installation: Installation = {
       id: tokenData.installation_id,
-      hubUrl: pending.hubUrl,
+      hubUrl: pending.hub,
       appId: tokenData.app_id,
       botId: tokenData.bot_id,
       appToken: tokenData.app_token,
@@ -142,7 +158,7 @@ export async function handleOAuthRedirect(
 
     console.log(`[OAuth] 安装成功: ${installation.id}`);
 
-    // OAuth 完成后同步工具定义到 Hub
+    // 成功后同步工具定义到 Hub
     if (tools && tools.length > 0) {
       const hubClient = new HubClient(installation.hubUrl, installation.appToken);
       await hubClient.syncTools(tools).catch((err) => {
@@ -150,14 +166,20 @@ export async function handleOAuthRedirect(
       });
     }
 
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        ok: true,
-        message: "安装成功",
-        installation_id: installation.id,
-      })
-    );
+    // 重定向到 returnUrl（如果有的话），否则返回 JSON
+    if (pending.returnUrl) {
+      res.writeHead(302, { Location: pending.returnUrl });
+      res.end();
+    } else {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          message: "安装成功",
+          installation_id: installation.id,
+        }),
+      );
+    }
   } catch (err) {
     console.error("[OAuth] 异常:", err);
     res.writeHead(500, { "Content-Type": "application/json" });
