@@ -1,21 +1,59 @@
 /**
- * 钉钉 集成测试 — 通用工具函数
- *
- * 通过 OpeniLink Hub Mock Server 注入事件、查询已发消息、重置状态。
+ * 钉钉集成测试工具类 - 与 Mock Hub Server 交互
  */
+import http from "node:http";
+import {
+  createMockHub,
+  getSentMessages,
+  resetSentMessages,
+  WEBHOOK_SECRET,
+  APP_TOKEN,
+  INSTALLATION_ID,
+  BOT_ID,
+} from "./mock-hub.js";
 
-/** Mock Hub 服务地址 */
-export const MOCK_HUB_URL = "http://localhost:9801";
+/** Mock Server 端口配置 */
+export const MOCK_HUB_PORT = 9901;
+export const MOCK_HUB_URL = `http://localhost:${MOCK_HUB_PORT}`;
+export const MOCK_APP_TOKEN = APP_TOKEN;
+export const MOCK_WEBHOOK_SECRET = WEBHOOK_SECRET;
+export const MOCK_INSTALLATION_ID = INSTALLATION_ID;
+export const MOCK_BOT_ID = BOT_ID;
 
-/** Mock 应用令牌 */
-export const MOCK_APP_TOKEN = "mock_app_token";
+/** App 的 webhook 端口和地址 */
+export const APP_PORT = 9902;
+export const APP_WEBHOOK_URL = `http://localhost:${APP_PORT}/hub/webhook`;
 
 /**
- * 向 Mock Server 注入一条模拟微信消息事件
- * Mock Server 会通过 Webhook 将事件推送给 App
- *
- * @param sender  - 发送者 ID（模拟微信用户）
- * @param content - 消息文本内容
+ * 启动 Mock Hub Server 实例
+ * 返回 server 和清理函数
+ */
+export function startMockHub(): Promise<{
+  server: http.Server;
+  close: () => Promise<void>;
+}> {
+  return new Promise((resolve, reject) => {
+    const server = createMockHub(MOCK_HUB_PORT, APP_WEBHOOK_URL);
+    server.on("error", reject);
+    server.listen(MOCK_HUB_PORT, () => {
+      console.log(`[setup] Mock Hub Server 已启动，端口 ${MOCK_HUB_PORT}`);
+      resolve({
+        server,
+        close: () =>
+          new Promise<void>((res) =>
+            server.close(() => {
+              console.log("[setup] Mock Hub Server 已关闭");
+              res();
+            }),
+          ),
+      });
+    });
+  });
+}
+
+/**
+ * 注入模拟微信消息到 Mock Server
+ * Mock Server 会将该消息作为 Hub 事件推送给 App 的 webhook
  */
 export async function injectMessage(
   sender: string,
@@ -27,84 +65,41 @@ export async function injectMessage(
     body: JSON.stringify({ sender, content }),
   });
   if (!res.ok) {
-    throw new Error(
-      `注入消息失败: ${res.status} ${await res.text()}`,
-    );
+    throw new Error(`注入消息失败: ${res.status} ${await res.text()}`);
   }
 }
 
 /**
- * 注入一条命令事件
- *
- * @param sender  - 发送者 ID
- * @param command - 命令名称（如 "/help"）
- * @param args    - 命令参数
- */
-export async function injectCommand(
-  sender: string,
-  command: string,
-  args: Record<string, unknown> = {},
-): Promise<void> {
-  const res = await fetch(`${MOCK_HUB_URL}/mock/event`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sender, command, args }),
-  });
-  if (!res.ok) {
-    throw new Error(
-      `注入命令失败: ${res.status} ${await res.text()}`,
-    );
-  }
-}
-
-/**
- * 获取 Mock Server 记录的所有 App 发送的消息
- *
- * @returns 消息数组（由 Mock Server 记录的 /bot/v1/message/send 请求）
+ * 获取 App 发送到 Mock Hub 的消息列表
+ * 优先从同进程直接获取
  */
 export async function getMessages(): Promise<any[]> {
-  const res = await fetch(`${MOCK_HUB_URL}/mock/messages`, {
-    method: "GET",
-  });
-  if (!res.ok) {
-    throw new Error(
-      `获取消息失败: ${res.status} ${await res.text()}`,
-    );
-  }
-  return res.json();
+  return getSentMessages();
 }
 
 /**
- * 重置 Mock Server 状态（清空已记录的消息和事件）
+ * 重置 Mock Server 状态
+ * 每个测试用例前调用，确保测试隔离
  */
 export async function resetMock(): Promise<void> {
-  const res = await fetch(`${MOCK_HUB_URL}/mock/reset`, {
-    method: "POST",
-  });
-  if (!res.ok) {
-    throw new Error(
-      `重置 Mock 失败: ${res.status} ${await res.text()}`,
-    );
-  }
+  resetSentMessages();
 }
 
 /**
- * 等待条件满足，超时后抛出异常
- *
- * @param fn         - 返回 truthy 值表示条件满足
- * @param timeoutMs  - 超时时间（毫秒），默认 5000
- * @param intervalMs - 轮询间隔（毫秒），默认 200
+ * 等待条件满足（轮询）
+ * @param fn - 条件判断函数，返回 true 表示条件满足
+ * @param timeoutMs - 超时时间，默认 10 秒
+ * @param intervalMs - 轮询间隔，默认 200 毫秒
  */
 export async function waitFor(
-  fn: () => Promise<unknown> | unknown,
-  timeoutMs = 5000,
+  fn: () => Promise<boolean>,
+  timeoutMs = 10_000,
   intervalMs = 200,
 ): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const result = await fn();
-    if (result) return;
-    await new Promise((r) => setTimeout(r, intervalMs));
+    if (await fn()) return;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
-  throw new Error(`waitFor 超时（${timeoutMs}ms）`);
+  throw new Error(`等待超时：${timeoutMs}ms 内条件未满足`);
 }
