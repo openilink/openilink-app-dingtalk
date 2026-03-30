@@ -7,7 +7,8 @@ import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { loadConfig } from "./config.js";
 import { Store } from "./store.js";
-import { handleOAuthSetup, handleOAuthRedirect } from "./hub/oauth.js";
+import { handleOAuthSetup, handleOAuthRedirect, handleOAuthNotify, cleanExpired } from "./hub/oauth.js";
+import { handleSettingsPage, handleSettingsVerify, handleSettingsSave } from "./hub/settings.js";
 import { handleWebhook, readBody } from "./hub/webhook.js";
 import { createManifest } from "./hub/manifest.js";
 import type { HubEvent, ToolResult } from "./hub/types.js";
@@ -24,15 +25,22 @@ function getOrCreateDingtalkClient(
   clientId: string,
   clientSecret: string,
   robotCode: string,
-  defaultClient: DingtalkClient,
+  defaultClient: DingtalkClient | null,
 ): DingtalkClient {
-  if (!installationId) return defaultClient;
+  // 如果没有 installationId 且有默认客户端，直接复用
+  if (!installationId && defaultClient) return defaultClient;
   const cached = dingtalkClientCache.get(installationId);
   if (cached) return cached;
-  const client = new DingtalkClient(clientId, clientSecret, robotCode);
-  dingtalkClientCache.set(installationId, client);
-  console.log(`[Server] 为安装 ${installationId} 创建了独立的钉钉客户端`);
-  return client;
+  // 如果有凭证则创建新客户端并缓存
+  if (clientId && clientSecret) {
+    const client = new DingtalkClient(clientId, clientSecret, robotCode);
+    dingtalkClientCache.set(installationId, client);
+    console.log(`[Server] 为安装 ${installationId} 创建了独立的钉钉客户端`);
+    return client;
+  }
+  // 兜底：使用默认客户端
+  if (defaultClient) return defaultClient;
+  throw new Error(`[Server] 安装 ${installationId} 缺少钉钉凭证且无默认客户端`);
 }
 
 // 加载配置
@@ -40,16 +48,25 @@ const config = loadConfig();
 const store = new Store(config.dbPath);
 const manifest = createManifest(config);
 
-// 初始化钉钉客户端
-const dingtalkClient = new DingtalkClient(
-  config.dingtalkClientId,
-  config.dingtalkClientSecret,
-  config.dingtalkRobotCode,
-);
+// 初始化钉钉客户端（如果环境变量中配置了钉钉凭证）
+const hasDingtalkCredentials = !!(config.dingtalkClientId && config.dingtalkClientSecret);
+const dingtalkClient = hasDingtalkCredentials
+  ? new DingtalkClient(
+      config.dingtalkClientId,
+      config.dingtalkClientSecret,
+      config.dingtalkRobotCode,
+    )
+  : null;
+if (dingtalkClient) {
+  console.log("[Server] 钉钉客户端初始化完成");
+} else {
+  console.log("[Server] 未配置钉钉凭证，跳过默认钉钉客户端初始化（云端托管模式，用户安装时填写）");
+}
 
-// 收集所有工具定义和处理器
+// 收集所有工具定义和处理器（需要一个客户端实例来获取定义，如果没有默认客户端则用空凭证的客户端仅收集定义）
+const toolsSdkClient = dingtalkClient ?? new DingtalkClient("", "", "");
 const { definitions: toolDefinitions, handlers: toolHandlers } =
-  collectAllTools(dingtalkClient);
+  collectAllTools(toolsSdkClient);
 console.log(`[Server] 已注册 ${toolDefinitions.length} 个 AI Tools`);
 
 // 将工具定义转换为 Hub 同步格式
@@ -170,6 +187,9 @@ async function onHubEvent(event: HubEvent): Promise<void> {
   console.log(`[Event] 事件数据:`, JSON.stringify(event.event?.data));
 }
 
+// 定期清理过期的 PKCE 缓存
+const cleanupTimer = setInterval(cleanExpired, 60_000);
+
 /**
  * HTTP 请求路由
  */
@@ -195,9 +215,9 @@ async function handleRequest(
       return;
     }
 
-    // OAuth 安装流程
-    if (pathname === "/oauth/setup" && req.method === "GET") {
-      handleOAuthSetup(req, res, config);
+    // GET/POST /oauth/setup - OAuth 安装流程（显示配置表单 / 提交后跳转授权）
+    if (pathname === "/oauth/setup" && (req.method === "GET" || req.method === "POST")) {
+      await handleOAuthSetup(req, res, config);
       return;
     }
 
@@ -207,32 +227,29 @@ async function handleRequest(
         await handleOAuthRedirect(req, res, config, store, toolsForHub);
       } else if (req.method === "POST") {
         // 模式 2: Hub 直接安装通知
-        const body = await readBody(req);
-        const data = JSON.parse(body);
-        store.saveInstallation({
-          id: data.installation_id,
-          hubUrl: data.hub_url || config.hubUrl,
-          appId: "",
-          botId: data.bot_id || "",
-          appToken: data.app_token,
-          webhookSecret: data.webhook_secret,
-        });
-        // 异步同步 tools 到 Hub
-        const notifyHubClient = new HubClient(data.hub_url || config.hubUrl, data.app_token);
-        notifyHubClient.syncTools(toolsForHub).catch(console.error);
-        // 异步拉取用户配置并加密存储到本地
-        notifyHubClient.fetchConfig().then((cfg) => {
-          if (Object.keys(cfg).length > 0) {
-            store.saveConfig(data.installation_id, cfg);
-            console.log("[notify] 用户配置已拉取并加密存储");
-          }
-        }).catch((e) => console.error("[notify] 拉取用户配置失败:", e));
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ webhook_url: `${config.baseUrl}/hub/webhook` }));
+        await handleOAuthNotify(req, res, config, store, toolsForHub);
       } else {
         res.writeHead(405, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Method Not Allowed" }));
       }
+      return;
+    }
+
+    // GET /settings — 设置页面（输入 token 验证身份）
+    if (req.method === "GET" && pathname === "/settings") {
+      handleSettingsPage(req, res);
+      return;
+    }
+
+    // POST /settings/verify — 验证 token 后显示配置表单
+    if (req.method === "POST" && pathname === "/settings/verify") {
+      await handleSettingsVerify(req, res, config, store);
+      return;
+    }
+
+    // POST /settings/save — 保存修改后的配置
+    if (req.method === "POST" && pathname === "/settings/save") {
+      await handleSettingsSave(req, res, config, store);
       return;
     }
 
@@ -271,12 +288,14 @@ server.listen(Number(config.port), () => {
 // 优雅退出
 process.on("SIGINT", () => {
   console.log("\n[Server] 正在关闭...");
+  clearInterval(cleanupTimer);
   store.close();
   server.close(() => process.exit(0));
 });
 
 process.on("SIGTERM", () => {
   console.log("[Server] 收到 SIGTERM，正在关闭...");
+  clearInterval(cleanupTimer);
   store.close();
   server.close(() => process.exit(0));
 });
