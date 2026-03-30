@@ -127,21 +127,21 @@ export class Store {
     return Number(result.lastInsertRowid);
   }
 
-  /** 根据钉钉消息 ID 查找关联记录 */
-  getMessageLinkByDingtalkMsg(msgId: string): MessageLink | undefined {
+  /** 根据钉钉消息 ID 和安装实例 ID 查找关联记录 */
+  getMessageLinkByDingtalkMsg(msgId: string, installationId: string): MessageLink | undefined {
     const row = this.db
-      .prepare("SELECT * FROM message_links WHERE dingtalk_msg_id = ?")
-      .get(msgId) as Record<string, unknown> | undefined;
+      .prepare("SELECT * FROM message_links WHERE dingtalk_msg_id = ? AND installation_id = ?")
+      .get(msgId, installationId) as Record<string, unknown> | undefined;
     return row ? this.rowToMessageLink(row) : undefined;
   }
 
-  /** 获取某个微信用户最新的关联记录 */
-  getLatestLinkByWxUser(wxUserId: string): MessageLink | undefined {
+  /** 获取某个微信用户在指定安装实例下最新的关联记录 */
+  getLatestLinkByWxUser(wxUserId: string, installationId: string): MessageLink | undefined {
     const row = this.db
       .prepare(
-        "SELECT * FROM message_links WHERE wx_user_id = ? ORDER BY created_at DESC LIMIT 1"
+        "SELECT * FROM message_links WHERE wx_user_id = ? AND installation_id = ? ORDER BY created_at DESC LIMIT 1"
       )
-      .get(wxUserId) as Record<string, unknown> | undefined;
+      .get(wxUserId, installationId) as Record<string, unknown> | undefined;
     return row ? this.rowToMessageLink(row) : undefined;
   }
 

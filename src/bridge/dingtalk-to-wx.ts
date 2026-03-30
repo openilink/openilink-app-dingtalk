@@ -35,7 +35,7 @@ export class DingtalkToWx {
     }
 
     // 查找关联的微信用户
-    const link = this.findMatchingLink(data);
+    const link = this.findMatchingLink(data, installations);
 
     if (!link) {
       console.warn(
@@ -85,13 +85,15 @@ export class DingtalkToWx {
 
   /**
    * 查找与钉钉消息匹配的微信用户关联
-   * 优先按 conversationId 查找，然后按 msgId 查找
+   * 遍历所有安装实例，按 msgId 精确匹配
    */
-  private findMatchingLink(data: DingtalkMessageData): MessageLink | undefined {
-    // 按钉钉消息 ID 查找（精确匹配，用于回复场景）
+  private findMatchingLink(data: DingtalkMessageData, installations: Installation[]): MessageLink | undefined {
+    // 按钉钉消息 ID 查找（精确匹配，用于回复场景），遍历所有安装实例
     if (data.msgId) {
-      const link = this.store.getMessageLinkByDingtalkMsg(data.msgId);
-      if (link) return link;
+      for (const inst of installations) {
+        const link = this.store.getMessageLinkByDingtalkMsg(data.msgId, inst.id);
+        if (link) return link;
+      }
     }
 
     // 如果没有精确匹配，返回 undefined

@@ -164,7 +164,7 @@ export class WxToDingtalk {
     // 1. 查找 store 中最近的 MessageLink，获取 conversationId
     let link: MessageLink | undefined;
     if (wxUserId) {
-      link = this.store.getLatestLinkByWxUser(wxUserId);
+      link = this.store.getLatestLinkByWxUser(wxUserId, installation.id);
     }
 
     const conversationId = link?.dingtalkConversationId ?? '';
