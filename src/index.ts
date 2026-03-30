@@ -15,6 +15,26 @@ import { HubClient } from "./hub/client.js";
 import { DingtalkClient } from "./dingtalk/client.js";
 import { collectAllTools } from "./tools/index.js";
 
+/** 按 installation_id 缓存的 per-installation 钉钉客户端 */
+const dingtalkClientCache = new Map<string, DingtalkClient>();
+
+/** 获取或创建 per-installation 的钉钉客户端 */
+function getOrCreateDingtalkClient(
+  installationId: string,
+  clientId: string,
+  clientSecret: string,
+  robotCode: string,
+  defaultClient: DingtalkClient,
+): DingtalkClient {
+  if (!installationId) return defaultClient;
+  const cached = dingtalkClientCache.get(installationId);
+  if (cached) return cached;
+  const client = new DingtalkClient(clientId, clientSecret, robotCode);
+  dingtalkClientCache.set(installationId, client);
+  console.log(`[Server] 为安装 ${installationId} 创建了独立的钉钉客户端`);
+  return client;
+}
+
 // 加载配置
 const config = loadConfig();
 const store = new Store(config.dbPath);
@@ -78,6 +98,20 @@ async function onCommand(event: HubEvent, installationId: string): Promise<strin
     return `未找到安装: ${installationId}`;
   }
 
+  // 读取本地加密存储的用户配置，优先于环境变量
+  const userCfg = store.getConfig(installationId);
+  const clientId = userCfg.dingtalk_client_id || config.dingtalkClientId;
+  const clientSecret = userCfg.dingtalk_client_secret || config.dingtalkClientSecret;
+  const robotCode = userCfg.dingtalk_robot_code || config.dingtalkRobotCode;
+
+  // 如果用户有自定义凭证，使用 per-installation 缓存客户端
+  const instDingtalkClient = getOrCreateDingtalkClient(
+    installationId, clientId, clientSecret, robotCode, dingtalkClient,
+  );
+
+  // 用当前安装对应的钉钉客户端重新收集 tools handlers
+  const { handlers: instHandlers } = collectAllTools(instDingtalkClient);
+
   const data = event.event?.data;
   if (!data) return "缺少事件数据";
 
@@ -85,7 +119,7 @@ async function onCommand(event: HubEvent, installationId: string): Promise<strin
   const args = (data.args as Record<string, any>) ?? {};
   const userId = data.user_id as string;
 
-  const handler = toolHandlers.get(command);
+  const handler = instHandlers.get(command);
   if (!handler) {
     return `未知指令: ${command}`;
   }
@@ -184,9 +218,15 @@ async function handleRequest(
           webhookSecret: data.webhook_secret,
         });
         // 异步同步 tools 到 Hub
-        new HubClient(data.hub_url || config.hubUrl, data.app_token)
-          .syncTools(toolsForHub)
-          .catch(console.error);
+        const notifyHubClient = new HubClient(data.hub_url || config.hubUrl, data.app_token);
+        notifyHubClient.syncTools(toolsForHub).catch(console.error);
+        // 异步拉取用户配置并加密存储到本地
+        notifyHubClient.fetchConfig().then((cfg) => {
+          if (Object.keys(cfg).length > 0) {
+            store.saveConfig(data.installation_id, cfg);
+            console.log("[notify] 用户配置已拉取并加密存储");
+          }
+        }).catch((e) => console.error("[notify] 拉取用户配置失败:", e));
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ webhook_url: `${config.baseUrl}/hub/webhook` }));
       } else {

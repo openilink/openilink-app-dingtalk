@@ -17,6 +17,8 @@ export interface AppManifest {
   description: string;
   /** 订阅的事件类型列表 */
   events: string[];
+  /** 权限范围 */
+  scopes: string[];
   /** Hub 推送事件的 webhook 地址 */
   webhook_url: string;
   /** OAuth 安装入口 */
@@ -39,6 +41,7 @@ export function createManifest(config: Config): AppManifest {
     icon: "\u{1F535}",
     description: "微信 ↔ 钉钉双向消息桥接 + 钉钉 AI Tools",
     events: ["message", "command"],
+    scopes: ["message:read", "message:write", "tools:write", "config:read"],
     webhook_url: `${baseUrl}/hub/webhook`,
     setup_url: `${baseUrl}/oauth/setup`,
     config_schema: {
