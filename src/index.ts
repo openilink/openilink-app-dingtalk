@@ -8,7 +8,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { loadConfig } from "./config.js";
 import { Store } from "./store.js";
 import { handleOAuthSetup, handleOAuthRedirect } from "./hub/oauth.js";
-import { handleWebhook } from "./hub/webhook.js";
+import { handleWebhook, readBody } from "./hub/webhook.js";
 import { createManifest } from "./hub/manifest.js";
 import type { HubEvent, ToolResult } from "./hub/types.js";
 import { HubClient } from "./hub/client.js";
@@ -167,8 +167,32 @@ async function handleRequest(
       return;
     }
 
-    if (pathname === "/oauth/redirect" && req.method === "GET") {
-      await handleOAuthRedirect(req, res, config, store, toolsForHub);
+    if (pathname === "/oauth/redirect") {
+      if (req.method === "GET") {
+        // 模式 1: OAuth PKCE 回调
+        await handleOAuthRedirect(req, res, config, store, toolsForHub);
+      } else if (req.method === "POST") {
+        // 模式 2: Hub 直接安装通知
+        const body = await readBody(req);
+        const data = JSON.parse(body);
+        store.saveInstallation({
+          id: data.installation_id,
+          hubUrl: data.hub_url || config.hubUrl,
+          appId: "",
+          botId: data.bot_id || "",
+          appToken: data.app_token,
+          webhookSecret: data.webhook_secret,
+        });
+        // 异步同步 tools 到 Hub
+        new HubClient(data.hub_url || config.hubUrl, data.app_token)
+          .syncTools(toolsForHub)
+          .catch(console.error);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ webhook_url: `${config.baseUrl}/hub/webhook` }));
+      } else {
+        res.writeHead(405, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Method Not Allowed" }));
+      }
       return;
     }
 
